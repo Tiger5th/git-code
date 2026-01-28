@@ -1,27 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-  echo "请用 root 运行：sudo -i 后再执行"
-  exit 1
-fi
+# =========================================================
+# Sub-Store Assistant (GitHub Hosted Version)
+# v1.2.1 - Self-Install & Lion Compatible
+# =========================================================
 
-# 备份
-if [[ -f /root/substore.sh ]]; then
-  cp -a /root/substore.sh /root/substore.sh.bak.$(date +%F_%H%M%S)
-fi
-
-cat > /root/substore.sh <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-#############################################
-# Sub-Store Assistant Script
-# v1.2.0 - Lion Compatible & Zero Downtime
-#############################################
-
-SCRIPT_VER="1.2.0"
+# --- [关键配置] 你的 GitHub Raw 地址 ---
+# (请确保这个地址是准确的，脚本会用它来自我更新)
+UPDATE_URL="https://raw.githubusercontent.com/Tiger5th/git-code/refs/heads/master/sub-gemini.sh"
 SCRIPT_PATH="/root/substore.sh"
+
+# ================= 自我安装/更新逻辑 =================
+install_self() {
+  # 如果当前脚本不是在 /root/substore.sh 运行的（比如 curl | bash 管道运行）
+  # 或者文件不存在，则进行下载安装
+  if [[ "${0}" != "${SCRIPT_PATH}" ]] || [[ ! -f "${SCRIPT_PATH}" ]]; then
+    echo -e "\033[36m>>> 检测到管道运行或非本地路径，正在安装/更新到 ${SCRIPT_PATH} ...\033[0m"
+    
+    # 检测 curl
+    if ! command -v curl >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl; \
+      elif command -v yum >/dev/null 2>&1; then yum install -y curl; \
+      elif command -v apk >/dev/null 2>&1; then apk add curl; fi
+    fi
+
+    # 下载自身
+    if curl -sL "${UPDATE_URL}" -o "${SCRIPT_PATH}"; then
+      chmod +x "${SCRIPT_PATH}"
+      echo -e "\033[32m>>> 安装成功，正在启动...\033[0m"
+      exec "${SCRIPT_PATH}" "$@"
+      exit 0
+    else
+      echo -e "\033[31m>>> 下载失败，请检查 GitHub 地址或网络连接。\033[0m"
+      exit 1
+    fi
+  fi
+}
+
+# 执行自安装检查
+install_self "$@"
+
+# ================= 以下是核心逻辑 =================
+
+SCRIPT_VER="1.2.1"
 
 # --- 基础路径 ---
 STATE_DIR="/var/lib/substore-script"
@@ -34,11 +56,6 @@ LION_BASE="/home/web"
 LION_CONF_DIR="${LION_BASE}/conf.d"
 LION_CERT_DIR="${LION_BASE}/certs"
 LION_WEBROOT_DIR="${LION_BASE}/letsencrypt"
-
-# --- 容器内路径 ---
-C_CONF_DIR="/etc/nginx/conf.d"
-C_CERT_DIR="/etc/nginx/certs"
-C_WEBROOT_DIR="/var/www/letsencrypt"
 
 # --- 颜色 ---
 c_reset="\033[0m"
@@ -84,7 +101,6 @@ install_shortcut_silent() {
 exec ${SCRIPT_PATH} "\$@"
 SH
     chmod +x /usr/local/bin/st
-    # 仅第一次安装时提示，避免刷屏
     log "快捷指令 'st' 已自动安装，下次直接输入 st 即可启动。"
   fi
 }
@@ -310,9 +326,6 @@ domain_add_flow() {
   ensure_acme_sh
   mkdir -p "${cert_dir}"
   
-  # 1. 临时 Nginx 配置 (仅 Webroot/Standalone 需要，DNS 不需要)
-  # 但为了简单，我们先生成配置，确保证书目录没问题
-  
   # 2. 申请证书
   if [[ "${mode}" == "webroot" ]]; then
     acme_cmd --issue -d "${domain}" --webroot "${webroot}" --server letsencrypt \
@@ -418,7 +431,7 @@ uninstall_script() {
   header "卸载脚本及清理数据"
   warn "危险操作！这将删除："
   echo "1. 本脚本及 st 快捷指令"
-  echo "2. 由脚本生成的 Nginx 配置文件 (substore-*.conf)"
+  echo "2. 由脚本生成的 Nginx 配置文件"
   echo "3. Sub-Store 容器"
   echo "4. Sub-Store 数据目录 (可选)"
   separator
@@ -507,8 +520,5 @@ show_menu() {
 need_root
 ensure_deps
 install_shortcut_silent
+install_self "$@"
 while true; do show_menu; done
-EOF
-
-chmod +x /root/substore.sh
-/root/substore.sh
