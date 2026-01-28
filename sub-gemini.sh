@@ -59,25 +59,24 @@ need_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-# --- 自动安装快捷指令 ---
+# --- 自动安装快捷指令 (强制刷新) ---
 install_shortcut_silent() {
-  if [[ ! -f /usr/local/bin/st ]]; then
-    cat > /usr/local/bin/st <<SH
+  cat > /usr/local/bin/st <<SH
 #!/usr/bin/env bash
 exec ${SCRIPT_PATH} "\$@"
 SH
-    chmod +x /usr/local/bin/st
-  fi
+  chmod +x /usr/local/bin/st
 }
 
-# --- 在线更新脚本 (Fix 4) ---
+# --- 在线更新脚本 ---
 update_script_online() {
   header "脚本在线更新"
   info "正在从 GitHub 拉取最新版本..."
   
   local temp_file="/tmp/substore_update.sh"
   
-  if curl -sL "${UPDATE_URL}" -o "${temp_file}"; then
+  # 加上时间戳绕过 CDN 缓存
+  if curl -sL "${UPDATE_URL}?t=$(date +%s)" -o "${temp_file}"; then
     # 简单的完整性检查
     if ! grep -q "SCRIPT_VER" "${temp_file}"; then
       die "下载的文件似乎不完整，请检查 GitHub 地址或网络。"
@@ -185,7 +184,7 @@ deploy_substore_force() {
   local h_port="$(prompt "宿主机端口" "${HOST_PORT_DEFAULT}")"
   local data_dir="$(prompt "数据目录" "${DATA_DEFAULT}")"
   
-  # (Fix 3) 生成 24位 随机路径
+  # 生成 24位 随机路径
   local rand_path="/$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24)"
   local backend_path="$(prompt "后台路径 (建议保留默认)" "${rand_path}")"
   
@@ -220,7 +219,7 @@ EOF
   info "请前往 [容器管理] 查看详细信息，或 [域名管理] 配置 HTTPS。"
 }
 
-# (Fix 2) 查看信息
+# 查看信息
 view_connection_info() {
   header "连接信息查看"
   if [[ -f "${STATE_CFG_FILE}" ]]; then
@@ -237,7 +236,7 @@ view_connection_info() {
   fi
 }
 
-# (Fix 1) 容器独立管理菜单
+# 容器独立管理菜单
 container_manage_menu() {
   while true; do
     clear
@@ -284,22 +283,18 @@ container_manage_menu() {
   done
 }
 
-# ================= 域名管理 (精简展示) =================
-# ... (域名管理逻辑保持 v1.2.0 不变，为节省篇幅略去细节，功能已稳定) ...
-# 这里必须保留 manage_domains 等函数的定义，直接复用上个版本的逻辑即可
-# 为了完整性，建议将 v1.2.0 的 manage_domains, domain_add_flow 等函数完整保留在这里
+# ================= 域名管理 =================
 
 manage_domains() {
   local action="$1"
   local ngx_target
   ngx_target="$(detect_entry_nginx)" || { warn "未检测到 Nginx"; return; }
   
-  # 简化的路径判断
   local conf_base="/etc/nginx/conf.d"
   local cert_base="/etc/nginx/certs"
   local webroot_path=""
   [[ -d "${LION_WEBROOT_DIR}" ]] && webroot_path="${LION_WEBROOT_DIR}" && conf_base="${LION_CONF_DIR}" && cert_base="${LION_CERT_DIR}"
-  [[ -z "${webroot_path}" ]] && cert_base="${STATE_DIR}/certs" # 临时路径
+  [[ -z "${webroot_path}" ]] && cert_base="${STATE_DIR}/certs"
 
   case "${action}" in
     "add") domain_add_flow "${ngx_target}" "${conf_base}" "${cert_base}" "${webroot_path}" ;;
@@ -323,14 +318,12 @@ domain_add_flow() {
     local mode="standalone"
     [[ -n "${webroot}" ]] && mode="webroot"
     
-    # 简单的验证逻辑
     ensure_acme_sh
     mkdir -p "${cert_dir}"
     
     if [[ "${mode}" == "webroot" ]]; then
        acme_cmd --issue -d "${domain}" --webroot "${webroot}" --server letsencrypt || return
     else
-       # 简单的 Standalone 兜底
        local type="${ngx%%:*}"
        local name="${ngx#*:}"
        [[ "$type" == "docker" ]] && docker stop "$name"
@@ -340,7 +333,6 @@ domain_add_flow() {
     
     acme_cmd --install-cert -d "${domain}" --key-file "${cert_dir}/${domain}.key" --fullchain-file "${cert_dir}/${domain}.cer" --reloadcmd "true"
     
-    # 写入配置 (精简版)
     cat > "${conf_dir}/substore-${domain}.conf" <<EOF
 # @SS_MANAGED: true
 # @SS_DOMAIN: ${domain}
@@ -351,9 +343,18 @@ server {
     listen 443 ssl; server_name ${domain};
     ssl_certificate ${cert_dir}/${domain}.cer;
     ssl_certificate_key ${cert_dir}/${domain}.key;
+    
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
     location / {
         proxy_pass http://127.0.0.1:${SC_PORT};
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
     }
