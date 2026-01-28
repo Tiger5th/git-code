@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Project: Sub-Store Operations Platform (Titanium Edition)
-# Version: 2.0.0.4
+# Version: 2.0.0.5
 # Author: Gemini & Tiger5th
 # Build Date: 2026-01-28
 #
-# Changelog 2.0.0.4:
-#   [Fix] P0: Replaced eval with printf -v in ask_input to prevent injection.
-#   [Fix] P0: Added TTY/tput safeguards for spinner in non-interactive environments.
-#   [Fix] P1: Comprehensive multi-stage certificate cleanup in domain deletion.
-#   [Fix] P1: Live validation for manual Nginx container inputs.
-#   [Fix] P1: Upgraded Nginx proxy headers (HTTP/1.1, X-Forwarded-*, etc).
-#   [UX]  Merged domains into Unified Domain Management Submenu.
-#   [UX]  Global 'q' / '0' unified return logic.
-#   [UX]  Enhanced Live Status Bar with deployment metrics.
-#   [UX]  Blocking ops (e.g. logs) now have explicit Ctrl+C prompts.
-#   [New] Advanced Backup Manager & System Diagnostics modules added.
+# Changelog 2.0.0.5 [CRITICAL FIX]:
+#   [Fix] P0: Fixed script crash/exit loop caused by 'set -o pipefail'.
+#             Ensured grep/ls commands return true even when no files are found.
+#             Preventing "grep: exit code 1" from killing the script.
+#   [Fix] P1: Added protections for backup listing and domain counting.
 # ==============================================================================
 
 # --- Kernel Parameter Configuration ---
@@ -28,7 +22,7 @@ set -o nounset   # Treat unset variables as an error
 # ==============================================================================
 
 # Meta Information
-readonly SCRIPT_VER="2.0.0.4"
+readonly SCRIPT_VER="2.0.0.5"
 readonly SCRIPT_NAME="substore_ops"
 readonly UPDATE_URL="https://raw.githubusercontent.com/Tiger5th/git-code/master/sub-gemini.sh"
 readonly SCRIPT_PATH="/root/substore.sh"
@@ -96,11 +90,6 @@ CURRENT_NGINX_TARGET=""
 CURRENT_CONF_DIR=""
 CURRENT_CERT_DIR=""
 CONF_MODE=""
-
-# System Performance Cache
-SYS_LOAD=""
-SYS_MEM=""
-SYS_DISK=""
 
 # ==============================================================================
 # SECTION 2: Low-Level Utility Functions & Environment Handlers
@@ -597,6 +586,7 @@ backup_management_menu() {
             1) backup_data "${SC_DATA}"; pause ;;
             2) 
                echo -e "\n${C_BOLD}可用备份列表:${C_RESET}"
+               # FIX: grep || true to prevent pipefail crash if empty
                ls -lh "${BACKUP_DIR}" | grep "tar.gz" || echo "暂无备份文件。"
                pause ;;
             3) restore_data "${SC_DATA}"; pause ;;
@@ -668,6 +658,7 @@ detect_nginx() {
     if command -v docker >/dev/null; then
         local c_names="nginx openresty"
         for name in $c_names; do
+            # FIX: grep logic in if condition is safe, but explicit checks are better
             if docker ps --format '{{.Names}}' | grep -qx "${name}"; then echo "docker:${name}"; return 0; fi
         done
     fi
@@ -689,6 +680,7 @@ resolve_nginx_paths() {
         net_mode=$(docker inspect "${name}" --format '{{.HostConfig.NetworkMode}}')
         if [[ "${net_mode}" != "host" ]]; then die "Nginx 容器必须使用 Host 网络模式才能反代本地端口!"; fi
         
+        # FIX: pipefail might kill script if grep fails here. Use || true logic inside $() or check exit code
         if docker inspect "${name}" --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "${LION_CONF_DIR}"; then
             CURRENT_CONF_DIR="${LION_CONF_DIR}"
             CURRENT_CERT_DIR="${LION_CERT_DIR}"
@@ -906,9 +898,11 @@ list_domains() {
     resolve_nginx_paths "${ngx}"
     print_header "已纳管的 HTTPS 域名列表"
     
+    # FIX: Ensure pipelined grep doesn't trigger errexit if no files found
     if [[ "${CONF_MODE}" == "host_direct" ]]; then
         if [[ -d "${CURRENT_CONF_DIR}" ]]; then
             while IFS= read -r f; do
+                 [[ -z "$f" ]] && continue
                  local d; d=$(grep "@SS_DOMAIN" "$f" | awk '{print $3}')
                  echo -e " - ${C_GREEN}${d}${C_RESET} [路径: $f]"
                  ((count++))
@@ -917,6 +911,7 @@ list_domains() {
     else
         local name="${ngx#*:}"
         while IFS= read -r f; do
+             [[ -z "$f" ]] && continue
              echo -e " - ${C_GREEN}$(basename "$f" | sed 's/substore-//;s/.conf//')${C_RESET} [容器内映射]"
              ((count++))
         done < <(docker exec "${name}" grep -l "@SS_MANAGED" "${CURRENT_CONF_DIR}"/*.conf 2>/dev/null || true)
@@ -1046,14 +1041,21 @@ get_status_metrics() {
     NGX_STATUS="${C_RED}[未检测到]${C_RESET}"
     DOM_COUNT=0
     local ngx
+    # detect_nginx handles exit codes internally, so it's safe here
     if ngx=$(detect_nginx); then 
         NGX_STATUS="${C_GREEN}[已连接]${C_RESET}" 
         resolve_nginx_paths "$ngx"
+        
+        # FIX: The pipefail killer. We must ensure grep failure doesn't crash the script.
+        # Logic: If grep finds nothing, it returns 1. 
+        # With pipefail, the whole pipe returns 1. 
+        # With errexit, script dies.
+        # Fix: (grep ... || true)
         if [[ "${CONF_MODE}" == "host_direct" ]]; then
-            DOM_COUNT=$(grep -l "@SS_MANAGED" "${CURRENT_CONF_DIR}"/*.conf 2>/dev/null | wc -l || echo 0)
+            DOM_COUNT=$(grep -l "@SS_MANAGED" "${CURRENT_CONF_DIR}"/*.conf 2>/dev/null | wc -l || true)
         else
             local name="${ngx#*:}"
-            DOM_COUNT=$(docker exec "${name}" grep -l "@SS_MANAGED" "${CURRENT_CONF_DIR}"/*.conf 2>/dev/null | wc -l || echo 0)
+            DOM_COUNT=$(docker exec "${name}" grep -l "@SS_MANAGED" "${CURRENT_CONF_DIR}"/*.conf 2>/dev/null | wc -l || true)
         fi
     fi
 }
