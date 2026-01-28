@@ -205,7 +205,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tiger5th/git-code/refs/heads
 
 ---
 
-如果你希望 README 更“面向用户”（比如加截图、运行演示、菜单项说明更细、以及“面板环境 vs 纯净 Linux vs Docker Nginx”三套场景的差异），我也可以在你这份基础上再扩一版（内容会更长但更易懂）。
-::contentReference[oaicite:5]{index=5}
 
-[1]: https://raw.githubusercontent.com/Tiger5th/git-code/refs/heads/master/sub-gemini.sh "raw.githubusercontent.com"
