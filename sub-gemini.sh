@@ -3,20 +3,21 @@ set -euo pipefail
 
 # =========================================================
 # Sub-Store Assistant
-# v1.4.0 - Production Ready (Hooks & Safety)
+# v1.5.0 - Production Stability & UX Overhaul
 # =========================================================
 
 # --- [关键配置] 你的 GitHub Raw 地址 ---
 UPDATE_URL="https://raw.githubusercontent.com/Tiger5th/git-code/master/sub-gemini.sh"
 SCRIPT_PATH="/root/substore.sh"
 
-SCRIPT_VER="1.4.0"
+SCRIPT_VER="1.5.0"
 
 # --- 基础路径 ---
 STATE_DIR="/var/lib/substore-script"
 STATE_CFG_FILE="${STATE_DIR}/config.env"
-STATE_DOMAINS_FILE="${STATE_DIR}/domains.db"
-HOOK_SCRIPT_DIR="${STATE_DIR}/hooks" # [P0-1] 存放续期钩子脚本
+HOOK_SCRIPT_DIR="${STATE_DIR}/hooks"
+# 本地证书仓库 (acme.sh 安装目标)
+LOCAL_CERT_REPO="${STATE_DIR}/certs_repo"
 
 # --- 科技 Lion / 面板标准路径 ---
 LION_BASE="/home/web"
@@ -27,7 +28,6 @@ LION_WEBROOT_DIR="${LION_BASE}/letsencrypt"
 # --- 容器内标准路径 ---
 C_CONF_DIR="/etc/nginx/conf.d"
 C_CERT_DIR="/etc/nginx/certs"
-C_WEBROOT_DIR="/var/www/letsencrypt"
 
 # --- 颜色 ---
 c_reset="\033[0m"
@@ -37,6 +37,7 @@ c_yellow="\033[33m"
 c_blue="\033[34m"
 c_cyan="\033[36m"
 c_dim="\033[2m"
+c_bold="\033[1m"
 
 # --- 默认参数 ---
 IMAGE_DEFAULT="xream/sub-store"
@@ -55,7 +56,7 @@ warn() { echo -e "${c_yellow}[WARN]${c_reset} $*"; }
 die()  { echo -e "${c_red}[ERR]${c_reset} $*"; exit 1; }
 
 separator() { echo -e "${c_dim}-----------------------------------------------------------${c_reset}"; }
-header() { echo -e "\n${c_cyan}>>> $1${c_reset}"; separator; }
+header() { echo -e "\n${c_cyan}${c_bold}>>> $1${c_reset}"; separator; }
 
 need_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -68,14 +69,12 @@ has_cmd() { command -v "$1" >/dev/null 2>&1; }
 # [P0-4] 删库防呆检查
 check_safe_path() {
   local p="$1"
-  # 禁止删除根目录、系统关键目录
   if [[ "$p" == "/" || "$p" == "/root" || "$p" == "/home" || "$p" == "/usr" || "$p" == "/var" || "$p" == "/etc" || "$p" == "/bin" ]]; then
     die "安全保护触发：禁止操作高危路径 [$p]"
   fi
   if [[ -z "$p" ]]; then die "路径为空，操作取消"; fi
 }
 
-# [P1-6] 端口与域名校验
 is_valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
@@ -91,11 +90,9 @@ check_port_occupied() {
 }
 
 is_valid_domain() {
-  # 简单的域名正则
   [[ "$1" =~ ^[a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+$ ]]
 }
 
-# --- 自动安装快捷指令 ---
 install_shortcut_silent() {
   mkdir -p "$(dirname "${SCRIPT_PATH}")"
   cat > /usr/local/bin/st <<SH
@@ -105,32 +102,20 @@ SH
   chmod +x /usr/local/bin/st
 }
 
-# --- [P2-7] 原子化更新 ---
+# --- 原子化更新 ---
 update_script_online() {
   header "脚本在线更新"
   info "正在拉取最新版本..."
   
   local temp_file="/tmp/substore_update_new.sh"
-  
-  # 下载到临时文件
   if curl -sL "${UPDATE_URL}?t=$(date +%s)" -o "${temp_file}"; then
-    # 校验
     if ! grep -q "SCRIPT_VER" "${temp_file}"; then
       die "下载文件校验失败（内容不完整），请检查网络。"
     fi
-
-    # 修复换行符
     sed -i 's/\r$//' "${temp_file}"
-
-    # 备份旧版
-    if [[ -f "${SCRIPT_PATH}" ]]; then
-      cp "${SCRIPT_PATH}" "${SCRIPT_PATH}.bak"
-    fi
-
-    # 替换
+    [[ -f "${SCRIPT_PATH}" ]] && cp "${SCRIPT_PATH}" "${SCRIPT_PATH}.bak"
     mv "${temp_file}" "${SCRIPT_PATH}"
     chmod +x "${SCRIPT_PATH}"
-    
     log "更新成功 (v${SCRIPT_VER} -> 新版)！正在重启..."
     exec "${SCRIPT_PATH}" "$@"
   else
@@ -138,10 +123,11 @@ update_script_online() {
   fi
 }
 
-# --- 交互输入 ---
+# --- 交互输入优化 ---
 prompt() {
   local label="$1" def="$2" val
-  read -r -p "${label} [默认: ${def}]: " val || true
+  # P2-3: 增加清晰度
+  read -r -p "${c_bold}${label}${c_reset} [默认: ${def}]: " val || true
   [[ -z "${val}" ]] && echo "${def}" || echo "${val}"
 }
 
@@ -169,15 +155,9 @@ prompt_domain() {
   done
 }
 
-prompt_secret() {
-  local label="$1" val
-  read -r -p "${label}: " val || true
-  echo "${val}"
-}
-
 confirm() {
   local msg="$1" yn
-  read -r -p "${msg} (y/N): " yn || true
+  read -r -p "${c_yellow}${msg}${c_reset} (y/N): " yn || true
   yn="${yn:-N}"
   [[ "${yn}" =~ ^[Yy]$ ]]
 }
@@ -195,9 +175,11 @@ ensure_deps() {
     fi
   fi
   mkdir -p "${HOOK_SCRIPT_DIR}"
+  mkdir -p "${LOCAL_CERT_REPO}"
 }
 
 ensure_docker() {
+  # P1-4: 先检查命令是否存在
   if ! has_cmd docker; then
     warn "未检测到 Docker。"
     confirm "是否允许脚本自动安装 Docker?" || die "需要 Docker 才能继续。"
@@ -216,20 +198,35 @@ ensure_acme_sh() {
 
 acme_cmd() { "${HOME}/.acme.sh/acme.sh" "$@"; }
 
-# ================= Nginx 核心逻辑 (P0/P1修复) =================
+# ================= Nginx 核心逻辑 (重构版) =================
 
 detect_entry_nginx() {
-  # 优先 Docker
-  local c_names="nginx openresty"
-  for name in $c_names; do
-    if docker ps --format '{{.Names}}' | grep -qx "${name}"; then echo "docker:${name}"; return 0; fi
-  done
-  # 其次 Host
+  # P1-4: 修复无Docker环境报错
+  if has_cmd docker; then
+    local c_names="nginx openresty"
+    for name in $c_names; do
+      if docker ps --format '{{.Names}}' | grep -qx "${name}"; then echo "docker:${name}"; return 0; fi
+    done
+  fi
+  
   if pgrep -x nginx >/dev/null 2>&1; then echo "host:system"; return 0; fi
   return 1
 }
 
-# [P0-3] 智能路径解析：决定写文件到 Host 还是 Docker cp
+# [P0-3] 严格的 Docker 网络检查
+check_docker_nginx_network() {
+  local ngx_name="$1"
+  local net_mode
+  net_mode=$(docker inspect "${ngx_name}" --format '{{.HostConfig.NetworkMode}}')
+  
+  if [[ "${net_mode}" != "host" ]]; then
+    warn "检测到 Nginx 容器 [${ngx_name}] 网络模式为: ${net_mode}"
+    warn "原因: 非 host 模式下，Nginx 容器无法通过 127.0.0.1 访问 Sub-Store。"
+    die "请修改 Nginx 容器为 host 网络，或使用宿主机 Nginx。"
+  fi
+}
+
+# 智能路径解析
 resolve_paths_for_entry_nginx() {
   local ngx="$1"
   local type="${ngx%%:*}"
@@ -241,12 +238,15 @@ resolve_paths_for_entry_nginx() {
   TARGET_CERT_DIR="/etc/nginx/certs"
   
   if [[ "$type" == "docker" ]]; then
+     # P0-3: 检查网络兼容性
+     check_docker_nginx_network "${name}"
+  
      # 检查挂载 (简化逻辑：如果宿主机有 Lion 目录，优先用 Lion)
      if [[ -d "${LION_CONF_DIR}" ]]; then
         TARGET_CONF_DIR="${LION_CONF_DIR}"
         TARGET_CERT_DIR="${LION_CERT_DIR}"
      else
-        # 既然没有挂载，我们只能使用 docker cp 模式
+        # 无挂载，走 docker cp
         CONF_METHOD="docker_cp"
         TARGET_CONF_DIR="${C_CONF_DIR}" # 容器内路径
         TARGET_CERT_DIR="${C_CERT_DIR}" # 容器内路径
@@ -260,7 +260,42 @@ resolve_paths_for_entry_nginx() {
   fi
 }
 
-# [P1-5] 严格的 Reload：先 Test 后 Reload
+# [P0-1] 生成包含复制逻辑的 Hook 脚本
+generate_renewal_hook() {
+  local ngx="$1"
+  local domain="$2"
+  local type="${ngx%%:*}"
+  local name="${ngx#*:}"
+  local hook_file="${HOOK_SCRIPT_DIR}/renew_${domain}.sh"
+
+  local cert_file="${domain}.cer"
+  local key_file="${domain}.key"
+
+  # 开始写入 Hook
+  echo "#!/bin/bash" > "${hook_file}"
+  echo "# Hook generated by Sub-Store Assistant" >> "${hook_file}"
+  
+  # 1. 复制文件逻辑
+  if [[ "${CONF_METHOD}" == "host_direct" ]]; then
+     echo "cp '${LOCAL_CERT_REPO}/${cert_file}' '${TARGET_CERT_DIR}/'" >> "${hook_file}"
+     echo "cp '${LOCAL_CERT_REPO}/${key_file}' '${TARGET_CERT_DIR}/'" >> "${hook_file}"
+  else
+     # Docker cp 模式
+     echo "docker cp '${LOCAL_CERT_REPO}/${cert_file}' '${name}:${TARGET_CERT_DIR}/'" >> "${hook_file}"
+     echo "docker cp '${LOCAL_CERT_REPO}/${key_file}' '${name}:${TARGET_CERT_DIR}/'" >> "${hook_file}"
+  fi
+  
+  # 2. Reload 逻辑
+  if [[ "$type" == "docker" ]]; then
+    echo "docker exec ${name} nginx -s reload" >> "${hook_file}"
+  else
+    echo "if command -v systemctl >/dev/null; then systemctl reload nginx; else nginx -s reload; fi" >> "${hook_file}"
+  fi
+  
+  chmod +x "${hook_file}"
+  echo "${hook_file}"
+}
+
 reload_nginx_strict() {
   local ngx="$1"
   local type="${ngx%%:*}"
@@ -285,56 +320,38 @@ reload_nginx_strict() {
   fi
 }
 
-# [P0-1] 生成续期 Hook 脚本
-generate_reload_hook() {
-  local ngx="$1"
-  local domain="$2"
-  local type="${ngx%%:*}"
-  local name="${ngx#*:}"
-  local hook_file="${HOOK_SCRIPT_DIR}/reload_${domain}.sh"
-
-  # 写入具体的 reload 命令
-  echo "#!/bin/bash" > "${hook_file}"
-  if [[ "$type" == "docker" ]]; then
-    # Docker 模式：确保容器内也能读到证书 (如果是 docker cp 模式，续期后需要再次 cp)
-    if [[ "${CONF_METHOD}" == "docker_cp" ]]; then
-       # 这是一个复杂的场景，cron 里面没法跑 docker cp。
-       # 简化策略：仅执行 reload，假设使用了 volume。
-       # 如果完全无 volume，续期确实难。这里我们写最通用的 reload。
-       echo "docker exec ${name} nginx -s reload" >> "${hook_file}"
-    else
-       echo "docker exec ${name} nginx -s reload" >> "${hook_file}"
-    fi
-  else
-    echo "if command -v systemctl >/dev/null; then systemctl reload nginx; else nginx -s reload; fi" >> "${hook_file}"
-  fi
-  
-  chmod +x "${hook_file}"
-  echo "${hook_file}"
-}
-
 # ================= 容器核心逻辑 =================
 
-deploy_substore_force() {
+deploy_substore_flow() {
   ensure_docker
   header "部署/重置 Sub-Store 容器"
-  warn "此操作将删除旧容器并重新创建！"
+  
+  # P2-4: 预检摘要
+  echo -e "此操作将${c_red}删除旧容器${c_reset}并重新创建。数据目录将保留。"
   
   local c_name="$(prompt "容器名称" "${NAME_DEFAULT}")"
-  local h_port="$(prompt_port "宿主机端口" "${HOST_PORT_DEFAULT}")"
+  local h_port="$(prompt_port "宿主机端口 (监听 127.0.0.1)" "${HOST_PORT_DEFAULT}")"
   
   if check_port_occupied "${h_port}"; then
     warn "端口 ${h_port} 似乎被占用了。"
     confirm "是否坚持使用该端口?" || return
   fi
   
-  local data_dir="$(prompt "数据目录" "${DATA_DEFAULT}")"
-  # [P0-4] 路径检查
+  local data_dir="$(prompt "数据持久化目录" "${DATA_DEFAULT}")"
   check_safe_path "${data_dir}"
   
   local rand_path="/$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24)"
-  local backend_path="$(prompt "后台路径 (建议保留默认)" "${rand_path}")"
+  local backend_path="$(prompt "后台安全路径" "${rand_path}")"
   
+  # P2-4: 确认摘要
+  separator
+  echo -e "配置摘要:"
+  echo -e "  容器名: ${c_cyan}${c_name}${c_reset}"
+  echo -e "  端口: ${c_cyan}127.0.0.1:${h_port}${c_reset}"
+  echo -e "  数据: ${c_cyan}${data_dir}${c_reset}"
+  separator
+  confirm "确认开始部署?" || return
+
   mkdir -p "${data_dir}"
 
   if docker ps -a --format '{{.Names}}' | grep -qx "${c_name}"; then
@@ -362,8 +379,6 @@ SC_DATA=${data_dir}
 EOF
 
   log "部署成功！"
-  echo -e "  - 内部访问: http://127.0.0.1:${h_port}${backend_path}"
-  info "请前往 [容器管理] 查看详细信息，或 [域名管理] 配置 HTTPS。"
 }
 
 view_connection_info() {
@@ -414,10 +429,8 @@ container_manage_menu() {
          confirm "确定卸载容器？(数据文件将保留)" && docker rm -f "${current_name}" && log "容器已删除"; pause ;;
       6)
          confirm "⚠️ 高能预警：这将删除容器以及所有数据！不可恢复！确认？" || continue
-         # [P0-4] 删除前再读一次配置，防止变量为空删了根目录
          source "${STATE_CFG_FILE}"
-         check_safe_path "${SC_DATA}"
-         
+         check_safe_path "${SC_DATA}" # P0-4
          docker rm -f "${current_name}" 2>/dev/null
          rm -rf "${SC_DATA}"
          log "数据目录已粉碎: ${SC_DATA}"
@@ -431,28 +444,42 @@ container_manage_menu() {
 
 # ================= 域名管理 =================
 
+# [P0-2] 恢复 Nginx 辅助函数
+ensure_nginx_restore() {
+  local type="$1"
+  local name="$2"
+  info "正在恢复 Nginx 服务..."
+  if [[ "$type" == "docker" ]]; then
+     docker start "$name" >/dev/null 2>&1 || true
+  else
+     if has_cmd systemctl; then systemctl start nginx; else nginx; fi
+  fi
+}
+
 manage_domains() {
   local action="$1"
   local ngx_target
   ngx_target="$(detect_entry_nginx)" || { warn "未检测到 Nginx"; return; }
   
-  resolve_paths_for_entry_nginx "${ngx_target}" # 解析路径
-
-  # 本地临时路径 (用于 Standalone 或无挂载时)
-  local local_cert_dir="${STATE_DIR}/certs"
+  resolve_paths_for_entry_nginx "${ngx_target}"
 
   case "${action}" in
-    "add") domain_add_flow "${ngx_target}" "${local_cert_dir}" ;;
+    "add") domain_add_flow "${ngx_target}" ;;
     "list") 
         header "已配置域名"
-        # 扫描 conf 文件 (注意：如果是 docker_cp 模式，这里只能扫宿主机有的，或者进容器扫)
-        # 简化处理：扫宿主机已知位置
         if [[ -d "${TARGET_CONF_DIR}" ]]; then
            grep -l "@SS_MANAGED" "${TARGET_CONF_DIR}"/*.conf 2>/dev/null | while read -r f; do
               grep "@SS_DOMAIN" "$f" | awk '{print $3}'
-           done || echo "无 (或路径不可读)"
+           done || echo "无"
         else
-           echo "当前模式无法直接扫描列表 (配置在容器内)"
+           # P1-5: 容器内扫描支持
+           local type="${ngx_target%%:*}"
+           local name="${ngx_target#*:}"
+           if [[ "$type" == "docker" ]]; then
+              docker exec "${name}" grep -l "@SS_MANAGED" "${TARGET_CONF_DIR}"/*.conf 2>/dev/null | while read -r f; do
+                 echo "[容器内] $(basename $f)"
+              done || echo "无"
+           fi
         fi
         ;;
     "del") domain_del_flow "${ngx_target}" ;;
@@ -460,77 +487,72 @@ manage_domains() {
 }
 
 domain_add_flow() {
-    local ngx="$1" local_cert_base="$2"
+    local ngx="$1"
     source "${STATE_CFG_FILE}" 2>/dev/null || { warn "请先部署容器"; return; }
     
+    # P2-3: 增加解释
+    echo "说明: 请确保域名已解析到本机 IP，否则签发会失败。"
     local domain="$(prompt_domain "请输入域名")"
     
-    # 模式判断
     local mode="standalone"
     local webroot_path=""
-    # 如果宿主机有 webroot 目录，优先 Webroot
     if [[ -d "${LION_WEBROOT_DIR}" ]]; then
        mode="webroot"
        webroot_path="${LION_WEBROOT_DIR}"
     fi
 
-    ensure_acme_sh
-    mkdir -p "${local_cert_base}"
+    # P2-4: 摘要
+    separator
+    echo -e "域名配置摘要:"
+    echo -e "  域名: ${c_cyan}${domain}${c_reset}"
+    echo -e "  Nginx 模式: ${c_cyan}${CONF_METHOD}${c_reset}"
+    echo -e "  签发模式: ${c_cyan}${mode}${c_reset}"
+    separator
+    confirm "确认开始配置?" || return
 
+    ensure_acme_sh
+    
     info "正在申请证书 (模式: $mode)..."
     
     if [[ "${mode}" == "webroot" ]]; then
        acme_cmd --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt || return
     else
-       # [P0-2] Standalone 模式：处理 Host Nginx 冲突
+       # [P0-2] Trap 保护逻辑
        local type="${ngx%%:*}"
        local name="${ngx#*:}"
        
+       # 注册陷阱：脚本退出时尝试恢复 Nginx
+       trap 'ensure_nginx_restore "$type" "$name"' EXIT
+
        if [[ "$type" == "docker" ]]; then
           docker stop "$name"
        elif [[ "$type" == "host" ]]; then
           if has_cmd systemctl; then systemctl stop nginx; else nginx -s stop; fi
        fi
        
-       acme_cmd --issue --standalone -d "${domain}" --server letsencrypt
-       
-       # 恢复 Nginx
-       if [[ "$type" == "docker" ]]; then
-          docker start "$name"
-       elif [[ "$type" == "host" ]]; then
-          if has_cmd systemctl; then systemctl start nginx; else nginx; fi
+       if ! acme_cmd --issue --standalone -d "${domain}" --server letsencrypt; then
+          die "证书签发失败，正在恢复 Nginx..."
        fi
+       
+       # 签发成功，解除陷阱并手动恢复，继续后续流程
+       trap - EXIT
+       ensure_nginx_restore "$type" "$name"
     fi
     
-    # 生成 Hook 脚本 [P0-1]
+    # [P0-1] 关键：生成带复制逻辑的 Hook
     local hook_script
-    hook_script="$(generate_reload_hook "${ngx}" "${domain}")"
+    hook_script="$(generate_renewal_hook "${ngx}" "${domain}")"
     
-    # 安装证书 (Install 到本地临时，然后 cp)
-    # 修正逻辑：如果是挂载模式，直接 install 到挂载目录
-    # 如果是 cp 模式，install 到本地，然后 cp
-    
-    local final_cert_path="${TARGET_CERT_DIR}/${domain}.cer"
-    local final_key_path="${TARGET_CERT_DIR}/${domain}.key"
-    
-    # ACME install
-    # 这里我们统一 install 到脚本管理的目录，然后由 hook 负责 reload (对于 cp 模式，hook 可能需要负责 cp，这里简化为只做映射模式的支持)
-    # 为了兼容 P0 问题，我们 install 到 $local_cert_base，然后手动处理
+    # Install 到本地仓库 (LOCAL_CERT_REPO)
+    # 续期时，acme.sh 会更新 LOCAL_CERT_REPO 里的文件，然后执行 hook
+    # hook 负责把新文件 cp 到 Nginx 目录并 reload
     acme_cmd --install-cert -d "${domain}" \
-      --key-file "${local_cert_base}/${domain}.key" \
-      --fullchain-file "${local_cert_base}/${domain}.cer" \
+      --key-file "${LOCAL_CERT_REPO}/${domain}.key" \
+      --fullchain-file "${LOCAL_CERT_REPO}/${domain}.cer" \
       --reloadcmd "${hook_script}"
 
-    # 处理文件到位
-    if [[ "${CONF_METHOD}" == "host_direct" ]]; then
-       cp "${local_cert_base}/${domain}.key" "${TARGET_CERT_DIR}/"
-       cp "${local_cert_base}/${domain}.cer" "${TARGET_CERT_DIR}/"
-    else
-       # Docker cp 模式 [P0-3]
-       local name="${ngx#*:}"
-       docker cp "${local_cert_base}/${domain}.key" "${name}:${TARGET_CERT_DIR}/"
-       docker cp "${local_cert_base}/${domain}.cer" "${name}:${TARGET_CERT_DIR}/"
-    fi
+    # 手动触发一次 Hook 以完成首次部署
+    bash "${hook_script}"
     
     # 写入 Nginx 配置
     local conf_content
@@ -567,7 +589,6 @@ EOF
        rm "/tmp/${conf_file}"
     fi
 
-    # [P1-5] 严格 Reload
     reload_nginx_strict "${ngx}"
     
     log "HTTPS 访问地址: https://${domain}${SC_BACKEND}"
@@ -577,19 +598,19 @@ domain_del_flow() {
     local ngx="$1"
     local domain="$(prompt "输入要删除的域名" "")"
     
-    # 删除 conf
     if [[ "${CONF_METHOD}" == "host_direct" ]]; then
        rm -f "${TARGET_CONF_DIR}/substore-${domain}.conf"
        rm -f "${TARGET_CERT_DIR}/${domain}.cer" "${TARGET_CERT_DIR}/${domain}.key"
     else
        local name="${ngx#*:}"
        docker exec "${name}" rm -f "${TARGET_CONF_DIR}/substore-${domain}.conf"
-       # certs inside container difficult to clean via simple logic, skip to avoid errors
+       # certs 略过
     fi
     
     reload_nginx_strict "${ngx}"
     acme_cmd --remove -d "${domain}"
-    rm -f "${HOOK_SCRIPT_DIR}/reload_${domain}.sh" # 清理 hook
+    rm -f "${HOOK_SCRIPT_DIR}/renew_${domain}.sh"
+    rm -f "${LOCAL_CERT_REPO}/${domain}.cer" "${LOCAL_CERT_REPO}/${domain}.key"
     log "已删除"
 }
 
@@ -605,6 +626,17 @@ uninstall_script_full() {
   exit 0
 }
 
+# P2-2: 新手一键全家桶
+wizard_install() {
+  deploy_substore_flow
+  separator
+  if confirm "是否立即配置域名访问 (HTTPS)?"; then
+    manage_domains "add"
+  else
+    info "您稍后可在主菜单选择 [3] 配置域名。"
+  fi
+}
+
 # ================= 主菜单 =================
 
 show_menu() {
@@ -613,32 +645,41 @@ show_menu() {
   echo -e " Sub-Store Assistant (v${SCRIPT_VER}) "
   echo -e "===========================================================${c_reset}"
   
-  echo -e "${c_yellow}[ 容器业务 ]${c_reset}"
-  echo " 1. 部署/重置 Sub-Store (新装必点)"
-  echo " 2. 容器管理 & 信息"
+  # P2-1: 状态栏
+  local sc_status="未部署"
+  [[ -f "${STATE_CFG_FILE}" ]] && sc_status="${c_green}已部署${c_reset}"
+  local ngx_status
+  ngx_status="$(detect_entry_nginx || echo "${c_red}未运行${c_reset}")"
   
-  echo -e "\n${c_yellow}[ 域名与网络 ]${c_reset}"
-  echo " 3. 添加域名访问 (Auto HTTPS)"
-  echo " 4. 已配域名列表"
-  echo " 5. 删除域名访问"
+  echo -e " 容器: ${sc_status} | Nginx: ${c_green}${ngx_status}${c_reset}"
+  separator
+  
+  echo -e "${c_yellow}[ 新手向导 ]${c_reset}"
+  echo " 0. 一键全家桶 (部署+域名)"
+  
+  echo -e "\n${c_yellow}[ 核心功能 ]${c_reset}"
+  echo " 1. 部署/重置容器"
+  echo " 2. 容器管理面板"
+  echo " 3. 域名管理 (Auto HTTPS)"
   
   echo -e "\n${c_yellow}[ 脚本维护 ]${c_reset}"
-  echo " 8. 更新脚本 (Update)"
-  echo " 9. 卸载脚本 (Uninstall)"
-  echo " 0. 退出"
+  echo " 8. 更新脚本"
+  echo " 9. 卸载脚本"
+  echo " q. 退出"
   separator
   
   local choice
   read -r -p "请选择: " choice
   case "${choice}" in
-    1) deploy_substore_force; pause ;;
+    0) wizard_install; pause ;;
+    1) deploy_substore_flow; pause ;;
     2) container_manage_menu ;;
     3) manage_domains "add"; pause ;;
     4) manage_domains "list"; pause ;;
     5) manage_domains "del"; pause ;;
     8) update_script_online ;;
     9) uninstall_script_full ;;
-    0) exit 0 ;;
+    q) exit 0 ;;
     *) echo "无效选项"; sleep 1 ;;
   esac
 }
