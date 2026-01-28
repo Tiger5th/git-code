@@ -52,7 +52,9 @@ separator() { echo -e "${c_dim}-------------------------------------------------
 header() { echo -e "\n${c_cyan}>>> $1${c_reset}"; separator; }
 
 need_root() {
-  [[ "${EUID:-$(id -u)}" -ne 0 ]] && die "请用 root 运行"
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "请用 root 运行"
+  fi
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
