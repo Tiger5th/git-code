@@ -7,7 +7,7 @@ set -euo pipefail
 # =========================================================
 
 # --- [关键配置] 请修改为你的 GitHub Raw 地址 ---
-UPDATE_URL="https://raw.githubusercontent.com/Tiger5th/git-code/refs/heads/master/sub-gemini.sh"
+UPDATE_URL="https://raw.githubusercontent.com/Tiger5th/git-code/master/sub-gemini.sh"
 SCRIPT_PATH="/root/substore.sh"
 
 SCRIPT_VER="1.3.0"
