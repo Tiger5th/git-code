@@ -737,10 +737,11 @@ add_domain_ssl() {
     mkdir -p "${LOCAL_CERT_REPO}"
     log_info "正在向 Let's Encrypt 申请证书 (可能需要1-2分钟)..."
 
-    # Handle existing domain key to avoid acme.sh hard-fail
+    # Handle existing domain key (RSA/ECC) to avoid acme.sh hard-fail
     local domain_key="${HOME}/.acme.sh/${domain}/${domain}.key"
+    local domain_key_ecc="${HOME}/.acme.sh/${domain}_ecc/${domain}.key"
     local acme_key_flag=""
-    if [[ -f "${domain_key}" ]]; then
+    if [[ -f "${domain_key}" || -f "${domain_key_ecc}" ]]; then
         if ask_confirm "检测到已存在域名密钥，是否覆盖? (选 y 重新生成)" "n"; then
             acme_key_flag="--force"
         else
@@ -976,7 +977,7 @@ delete_domain() {
                 docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             fi
             # Also remove acme.sh domain key to avoid reuse/overwrite prompt
-            rm -rf "${HOME}/.acme.sh/${domain}"
+            rm -rf "${HOME}/.acme.sh/${domain}" "${HOME}/.acme.sh/${domain}_ecc"
             ;;
         3)
             log_info "保留证书文件不变。"
