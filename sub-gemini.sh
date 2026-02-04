@@ -734,12 +734,19 @@ add_domain_ssl() {
     if ! ask_confirm "确认开始申请证书及写入配置?"; then return; fi
     
     local acme="${HOME}/.acme.sh/acme.sh"
+    local acme_home="${ACME_HOME:-${HOME}/.acme.sh}"
+    if [[ -f "${HOME}/.acme.sh/account.conf" ]]; then
+        local conf_home
+        conf_home=$(grep -E '^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=' "${HOME}/.acme.sh/account.conf" \
+            | tail -n 1 | cut -d= -f2- | tr -d '"')
+        if [[ -n "${conf_home}" ]]; then acme_home="${conf_home}"; fi
+    fi
     mkdir -p "${LOCAL_CERT_REPO}"
     log_info "正在向 Let's Encrypt 申请证书 (可能需要1-2分钟)..."
 
     # Handle existing domain key (RSA/ECC) to avoid acme.sh hard-fail
-    local domain_key="${HOME}/.acme.sh/${domain}/${domain}.key"
-    local domain_key_ecc="${HOME}/.acme.sh/${domain}_ecc/${domain}.key"
+    local domain_key="${acme_home}/${domain}/${domain}.key"
+    local domain_key_ecc="${acme_home}/${domain}_ecc/${domain}.key"
     local acme_key_flag=""
     if [[ -f "${domain_key}" || -f "${domain_key_ecc}" ]]; then
         if ask_confirm "检测到已存在域名密钥，是否覆盖? (选 y 重新生成)" "n"; then
@@ -965,6 +972,14 @@ delete_domain() {
     echo " 3) 保留证书文件 (仅删除反代配置)"
     ask_input "选择清理模式" "1" clean_lvl "^[1-3]$" || return
 
+    local acme_home="${ACME_HOME:-${HOME}/.acme.sh}"
+    if [[ -f "${HOME}/.acme.sh/account.conf" ]]; then
+        local conf_home
+        conf_home=$(grep -E '^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=' "${HOME}/.acme.sh/account.conf" \
+            | tail -n 1 | cut -d= -f2- | tr -d '"')
+        if [[ -n "${conf_home}" ]]; then acme_home="${conf_home}"; fi
+    fi
+
     case "$clean_lvl" in
         1)
             rm -f "${LOCAL_CERT_REPO}/${domain}.cer" "${LOCAL_CERT_REPO}/${domain}.key"
@@ -977,7 +992,7 @@ delete_domain() {
                 docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             fi
             # Also remove acme.sh domain key to avoid reuse/overwrite prompt
-            rm -rf "${HOME}/.acme.sh/${domain}" "${HOME}/.acme.sh/${domain}_ecc"
+            rm -rf "${acme_home}/${domain}" "${acme_home}/${domain}_ecc"
             ;;
         3)
             log_info "保留证书文件不变。"
