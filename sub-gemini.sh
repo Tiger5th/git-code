@@ -101,6 +101,7 @@ init_environment() {
         touch "${LOG_FILE}"
         chmod 600 "${LOG_FILE}"
     fi
+    check_path_safety "${TEMP_DIR}"
     rm -rf "${TEMP_DIR:?}"/*
     if [[ ! -f "/usr/local/bin/st" ]]; then
         install_shortcut_silent
@@ -351,18 +352,29 @@ check_deps() {
     
     if [[ -n "$install_cmd" ]]; then
         eval "${install_cmd} curl grep awk socat tar openssl jq" >/dev/null 2>&1 &
-        spinner $! "安装基础系统工具包"
+        if ! spinner $! "安装基础系统工具包"; then
+            fail_step "依赖安装" "${install_cmd} curl grep awk socat tar openssl jq" "检查网络连通性或更换软件源"
+        fi
+    else
+        fail_step "依赖安装" "未检测到包管理器" "请手动安装 curl/grep/awk/socat/tar/openssl/jq"
     fi
 
     if ! command -v docker >/dev/null; then
         curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 &
-        spinner $! "安装 Docker Engine"
+        if ! spinner $! "安装 Docker Engine"; then
+            fail_step "Docker 安装" "curl -fsSL https://get.docker.com | sh" "检查网络或手动安装 Docker"
+        fi
         systemctl enable --now docker >/dev/null 2>&1 || true
     fi
 
     if [[ ! -f "${HOME}/.acme.sh/acme.sh" ]]; then
         curl https://get.acme.sh | sh -s email=substore@example.com >/dev/null 2>&1 &
-        spinner $! "安装 ACME.sh 证书管理工具"
+        if ! spinner $! "安装 ACME.sh 证书管理工具"; then
+            fail_step "ACME.sh 安装" "curl https://get.acme.sh | sh -s email=..." "检查网络或手动安装 acme.sh"
+        fi
+    fi
+    if [[ ! -f "${HOME}/.acme.sh/acme.sh" ]]; then
+        fail_step "ACME.sh 安装" "acme.sh 未找到" "请手动安装 acme.sh 并重试"
     fi
     log_success "所有依赖环境已准备就绪"
 }
@@ -392,6 +404,64 @@ check_path_safety() {
         die "系统安全保护：禁止操作宿主机高危路径 [$path]"
     fi
     if [[ -z "$path" ]]; then die "路径变量为空，已拦截。"; fi
+}
+
+fail_step() {
+    local step="$1"
+    local cmd="${2:-}"
+    local hint="${3:-}"
+    log_err "${step} 失败"
+    [[ -n "${cmd}" ]] && log_err "命令: ${cmd}"
+    [[ -n "${hint}" ]] && log_warn "建议: ${hint}"
+    die "${step} 失败。${cmd:+命令: ${cmd}。}${hint:+建议: ${hint}。}日志: ${LOG_FILE}"
+}
+
+confirm_delete_paths() {
+    local title="$1"
+    shift
+    local paths=("$@")
+    echo -e "\n${C_BOLD}${title}${C_RESET}"
+    for p in "${paths[@]}"; do
+        echo " - ${p}"
+    done
+    if ! ask_confirm "即将删除以上路径，确认继续?" "n"; then return 1; fi
+    return 0
+}
+
+safe_rm_rf() {
+    local paths=("$@")
+    for p in "${paths[@]}"; do
+        check_path_safety "$p"
+    done
+    confirm_delete_paths "删除路径清单" "${paths[@]}" || return 1
+    rm -rf "${paths[@]}"
+}
+
+safe_rm_contents() {
+    local dir="$1"
+    check_path_safety "$dir"
+    confirm_delete_paths "即将清空目录" "${dir}/*" || return 1
+    shopt -s nullglob
+    local targets=("${dir}/"*)
+    shopt -u nullglob
+    if [[ ${#targets[@]} -gt 0 ]]; then
+        rm -rf "${targets[@]}"
+    fi
+}
+
+ensure_cert_dir() {
+    local ngx="$1"
+    local type="${ngx%%:*}"
+    local name="${ngx#*:}"
+    if [[ "${CONF_MODE}" == "host_direct" ]]; then
+        if ! mkdir -p "${CURRENT_CERT_DIR}"; then
+            fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
+        fi
+    else
+        if ! docker exec "${name}" sh -c "mkdir -p '${CURRENT_CERT_DIR}'"; then
+            fail_step "创建证书目录" "docker exec ${name} mkdir -p ${CURRENT_CERT_DIR}" "检查容器权限或挂载是否可写"
+        fi
+    fi
 }
 
 update_self() {
@@ -469,10 +539,19 @@ deploy_container() {
     
     while true; do
         prompt_port "请输入宿主机映射端口 (仅绑 127.0.0.1)" "${HOST_PORT_DEFAULT}" h_port || return
-        if check_port_available "${h_port}"; then break; else
-            log_warn "端口 ${h_port} 已被占用。"
-            if ask_confirm "坚持使用该端口强制部署?"; then break; fi
-        fi
+        local port_status
+        if check_port_available "${h_port}"; then port_status=0; else port_status=$?; fi
+        case "${port_status}" in
+            0) break ;;
+            1)
+                log_warn "端口 ${h_port} 已被占用。"
+                if ask_confirm "坚持使用该端口强制部署?"; then break; fi
+                ;;
+            2)
+                log_warn "端口检测不可靠，后续可能失败。"
+                if ask_confirm "仍要使用该端口继续?"; then break; fi
+                ;;
+        esac
     done
     
     ask_input "请输入数据持久化目录" "${DATA_DEFAULT}" data_dir || return
@@ -510,15 +589,35 @@ SC_DATA=${data_dir}
 EOF
         log_success "容器部署完成并已启动。"
     else
-        die "容器启动失败，请检查 Docker 日志。"
+        fail_step "容器启动" "docker run --name ${c_name} ..." "检查 docker 日志: docker logs ${c_name}"
     fi
 }
 
 check_port_available() {
     local port="$1"
-    if command -v netstat >/dev/null; then netstat -tuln | grep -q ":${port} " && return 1;
-    elif command -v ss >/dev/null; then ss -tuln | grep -q ":${port} " && return 1; fi
-    return 0
+    if command -v ss >/dev/null; then
+        if ss -lntp 2>/dev/null | awk -v p=":${port}$" '$4 ~ p {found=1} END{exit !found}'; then
+            return 1
+        fi
+        return 0
+    fi
+    if command -v netstat >/dev/null; then
+        if netstat -lntp 2>/dev/null | awk -v p=":${port}$" '$4 ~ p {found=1} END{exit !found}'; then
+            return 1
+        fi
+        return 0
+    fi
+    # Fallback: parse /proc
+    local hex
+    hex=$(printf '%04X' "$port")
+    if awk -v p="$hex" '$4=="0A" && $2 ~ ":"p"$" {found=1} END{exit !found}' /proc/net/tcp 2>/dev/null; then
+        return 1
+    fi
+    if awk -v p="$hex" '$4=="0A" && $2 ~ ":"p"$" {found=1} END{exit !found}' /proc/net/tcp6 2>/dev/null; then
+        return 1
+    fi
+    log_warn "无法检测端口占用，后续可能失败。可手动检查: ss -lntp | grep :${port} 或 netstat -lntp | grep :${port}"
+    return 2
 }
 
 container_menu() {
@@ -591,7 +690,14 @@ backup_management_menu() {
                pause ;;
             3) restore_data "${SC_DATA}"; pause ;;
             4) 
-               if ask_confirm "将清空所有历史备份，确认?"; then rm -f "${BACKUP_DIR}"/*.tar.gz; log_success "已清空。"; fi
+               if ask_confirm "将清空所有历史备份，确认?"; then
+                   check_path_safety "${BACKUP_DIR}"
+                   shopt -s nullglob
+                   local bfiles=("${BACKUP_DIR}"/*.tar.gz)
+                   shopt -u nullglob
+                   if [[ ${#bfiles[@]} -gt 0 ]]; then rm -f "${bfiles[@]}"; fi
+                   log_success "已清空。"
+               fi
                pause ;;
             0|q|Q) return ;;
         esac
@@ -628,7 +734,11 @@ restore_data() {
         local sel_file="${BACKUP_DIR}/${backups[$sel]}"
         if ask_confirm "警告: 此操作将覆盖现有数据并重启容器，是否继续?"; then
             docker stop "${SC_NAME}" >/dev/null
-            rm -rf "${target_dir:?}"/*
+            if ! safe_rm_contents "${target_dir}"; then
+                docker start "${SC_NAME}" >/dev/null 2>&1 || true
+                log_warn "用户已取消清理，恢复流程终止。"
+                return
+            fi
             tar -xzf "${sel_file}" -C "$(dirname "$target_dir")"
             docker start "${SC_NAME}" >/dev/null
             log_success "恢复完成并重启容器。"
@@ -643,8 +753,9 @@ uninstall_container() {
     if ! ask_confirm "确认卸载容器 ${SC_NAME}? (不可逆)"; then return; fi
     docker rm -f "${SC_NAME}" >/dev/null
     if ask_confirm "是否同时删除挂载的数据目录 ${SC_DATA}? (选 y 彻底清空)"; then 
-        check_path_safety "${SC_DATA}"; 
-        rm -rf "${SC_DATA}"; 
+        if ! safe_rm_rf "${SC_DATA}"; then
+            log_warn "用户已取消数据目录清理。"
+        fi
     fi
     rm -f "${STATE_CFG_FILE}"
     log_success "卸载完成。"
@@ -678,7 +789,9 @@ resolve_nginx_paths() {
     if [[ "$type" == "docker" ]]; then
         local net_mode
         net_mode=$(docker inspect "${name}" --format '{{.HostConfig.NetworkMode}}')
-        if [[ "${net_mode}" != "host" ]]; then die "Nginx 容器必须使用 Host 网络模式才能反代本地端口!"; fi
+        if [[ "${net_mode}" != "host" ]]; then
+            fail_step "Nginx 网络模式检查" "docker inspect ${name} --format '{{.HostConfig.NetworkMode}}'" "容器需使用 host 网络或改用宿主机 Nginx"
+        fi
         
         # FIX: pipefail might kill script if grep fails here. Use || true logic inside $() or check exit code
         if docker inspect "${name}" --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "${LION_CONF_DIR}"; then
@@ -792,7 +905,7 @@ add_domain_ssl() {
             stop_nginx_service "$type" "$name"
             open_firewall_port "80"
             if ! run_acme_issue "standalone"; then
-                die "证书申请失败 (Webroot & Standalone)"
+                fail_step "证书申请" "acme.sh --issue (webroot/standalone)" "检查 DNS 解析、80/443 入站、防火墙与 Webroot 路径"
             fi
             trap - EXIT
             ensure_nginx_running "$type" "$name"
@@ -803,23 +916,32 @@ add_domain_ssl() {
         trap 'ensure_nginx_running "$type" "$name"' EXIT
         stop_nginx_service "$type" "$name"
         open_firewall_port "80"
-        if ! run_acme_issue "standalone"; then die "证书申请失败 (Standalone)"; fi
+        if ! run_acme_issue "standalone"; then
+            fail_step "证书申请" "acme.sh --issue --standalone" "检查 DNS 解析、80/443 入站、防火墙与端口占用"
+        fi
         trap - EXIT
         ensure_nginx_running "$type" "$name"
     fi
+
+    # Ensure cert directory exists before installing/copying
+    ensure_cert_dir "${ngx}"
     
     # Generate Reload Hook
     local hook_file="${HOOK_SCRIPT_DIR}/renew_${domain}.sh"
     generate_hook "${ngx}" "${domain}" "${hook_file}"
     
     # Install cert via acme.sh to local repo
-    "$acme" --install-cert -d "${domain}" \
+    if ! "$acme" --install-cert -d "${domain}" \
         --key-file "${LOCAL_CERT_REPO}/${domain}.key" \
         --fullchain-file "${LOCAL_CERT_REPO}/${domain}.cer" \
-        --reloadcmd "${hook_file}" >> "${LOG_FILE}" 2>&1
+        --reloadcmd "${hook_file}" >> "${LOG_FILE}" 2>&1; then
+        fail_step "安装证书" "acme.sh --install-cert -d ${domain}" "检查 acme.sh 输出与证书目录权限"
+    fi
     
     # Trigger initial hook to copy to Nginx
-    bash "${hook_file}"
+    if ! bash "${hook_file}"; then
+        fail_step "证书复制/重载" "bash ${hook_file}" "检查证书目录权限与 Nginx 状态"
+    fi
     
     # Write configuration and reload
     write_nginx_conf "${ngx}" "${domain}"
@@ -920,11 +1042,49 @@ server {
 }
 EOF
 )
+    local target="${CURRENT_CONF_DIR}/${conf}"
+    local tmp_host="${TEMP_DIR}/${conf}.tmp"
+
     if [[ "${CONF_MODE}" == "host_direct" ]]; then
-        echo "$content" > "${CURRENT_CONF_DIR}/${conf}"
+        if ! mkdir -p "${CURRENT_CONF_DIR}"; then
+            fail_step "创建 Nginx 配置目录" "mkdir -p ${CURRENT_CONF_DIR}" "检查权限或只读文件系统"
+        fi
+        local backup=""
+        if [[ -f "${target}" ]]; then
+            backup="${TEMP_DIR}/${conf}.bak.$(date +%s)"
+            cp "${target}" "${backup}" >/dev/null 2>&1 || true
+        fi
+        if ! echo "$content" > "${target}"; then
+            fail_step "写入 Nginx 配置" "write ${target}" "检查权限或磁盘空间"
+        fi
+        if [[ "${type}" == "docker" ]]; then
+            if ! docker exec "${name}" nginx -t; then
+                [[ -n "${backup}" ]] && cp "${backup}" "${target}" >/dev/null 2>&1 || true
+                fail_step "Nginx 配置校验" "docker exec ${name} nginx -t" "已保留原配置"
+            fi
+        else
+            if ! nginx -t; then
+                [[ -n "${backup}" ]] && cp "${backup}" "${target}" >/dev/null 2>&1 || true
+                fail_step "Nginx 配置校验" "nginx -t" "已保留原配置"
+            fi
+        fi
     else
-        echo "$content" > "${TEMP_DIR}/${conf}"
-        docker cp "${TEMP_DIR}/${conf}" "${name}:${CURRENT_CONF_DIR}/"
+        if ! echo "$content" > "${tmp_host}"; then
+            fail_step "写入临时配置" "write ${tmp_host}" "检查权限或磁盘空间"
+        fi
+        if ! docker exec "${name}" sh -c "mkdir -p '${CURRENT_CONF_DIR}'"; then
+            fail_step "创建 Nginx 配置目录" "docker exec ${name} mkdir -p ${CURRENT_CONF_DIR}" "检查容器权限或挂载是否可写"
+        fi
+        local backup_in="${CURRENT_CONF_DIR}/.${conf}.bak"
+        docker exec "${name}" sh -c "if [ -f '${target}' ]; then cp '${target}' '${backup_in}'; fi" >/dev/null 2>&1 || true
+        if ! docker cp "${tmp_host}" "${name}:${target}"; then
+            fail_step "写入 Nginx 配置" "docker cp ${tmp_host} ${name}:${target}" "检查容器状态与挂载权限"
+        fi
+        if ! docker exec "${name}" nginx -t; then
+            docker exec "${name}" sh -c "if [ -f '${backup_in}' ]; then mv '${backup_in}' '${target}'; else rm -f '${target}'; fi" >/dev/null 2>&1 || true
+            fail_step "Nginx 配置校验" "docker exec ${name} nginx -t" "已保留原配置"
+        fi
+        docker exec "${name}" rm -f "${backup_in}" >/dev/null 2>&1 || true
     fi
 }
 
@@ -934,18 +1094,29 @@ reload_nginx_strict() {
     local name="${ngx#*:}"
     log_info "测试配置并重载 Nginx..."
     if [[ "$type" == "docker" ]]; then
-        if docker exec "${name}" nginx -t; then 
-            docker exec "${name}" nginx -s reload; 
-            log_success "Reloaded successfully."
-        else 
-            die "Nginx 配置测试失败，操作回滚或中断。"
+        if docker exec "${name}" nginx -t; then
+            if docker exec "${name}" nginx -s reload; then
+                log_success "Reloaded successfully."
+            else
+                fail_step "Nginx 重载" "docker exec ${name} nginx -s reload" "检查容器内 Nginx 进程与权限"
+            fi
+        else
+            fail_step "Nginx 配置校验" "docker exec ${name} nginx -t" "检查配置语法或容器内日志"
         fi
     else
-        if nginx -t; then 
-            if command -v systemctl >/dev/null; then systemctl reload nginx; else nginx -s reload; fi; 
+        if nginx -t; then
+            if command -v systemctl >/dev/null; then
+                if ! systemctl reload nginx; then
+                    fail_step "Nginx 重载" "systemctl reload nginx" "检查服务状态或权限"
+                fi
+            else
+                if ! nginx -s reload; then
+                    fail_step "Nginx 重载" "nginx -s reload" "检查 Nginx 主进程状态"
+                fi
+            fi
             log_success "Reloaded successfully."
-        else 
-            die "Nginx 配置测试失败，操作回滚或中断。"
+        else
+            fail_step "Nginx 配置校验" "nginx -t" "检查配置语法或 /var/log/nginx/error.log"
         fi
     fi
 }
@@ -1025,7 +1196,9 @@ delete_domain() {
                 docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             fi
             # Also remove acme.sh domain key to avoid reuse/overwrite prompt
-            rm -rf "${acme_home}/${domain}" "${acme_home}/${domain}_ecc"
+            if ! safe_rm_rf "${acme_home}/${domain}" "${acme_home}/${domain}_ecc"; then
+                log_warn "用户已取消 ACME 目录清理。"
+            fi
             ;;
         3)
             log_info "保留证书文件不变。"
@@ -1078,12 +1251,18 @@ wizard_mode() {
 uninstall_all() {
     print_header "完全清理程序"
     if ! ask_confirm "警告: 此操作将删除脚本创建的所有容器、挂载目录及配置文件。确认执行? (y/q)"; then return; fi
+    local del_paths=("${STATE_DIR}" "/usr/local/bin/st" "${SCRIPT_PATH}")
     if [[ -f "${STATE_CFG_FILE}" ]]; then
         source "${STATE_CFG_FILE}"
         docker rm -f "${SC_NAME}" >/dev/null 2>&1 || true
-        rm -rf "${SC_DATA}"
+        if [[ -n "${SC_DATA:-}" ]]; then
+            del_paths+=("${SC_DATA}")
+        fi
     fi
-    rm -rf "${STATE_DIR}" "/usr/local/bin/st" "${SCRIPT_PATH}"
+    if ! safe_rm_rf "${del_paths[@]}"; then
+        log_warn "用户已取消清理。"
+        return
+    fi
     echo -e "${C_GREEN}所有资源清理完毕，感谢您的使用。${C_RESET}"
     exit 0
 }
