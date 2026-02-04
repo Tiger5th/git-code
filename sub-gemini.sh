@@ -736,16 +736,33 @@ add_domain_ssl() {
     local acme="${HOME}/.acme.sh/acme.sh"
     mkdir -p "${LOCAL_CERT_REPO}"
     log_info "正在向 Let's Encrypt 申请证书 (可能需要1-2分钟)..."
+
+    # Handle existing domain key to avoid acme.sh hard-fail
+    local domain_key="${HOME}/.acme.sh/${domain}/${domain}.key"
+    local acme_key_flag=""
+    if [[ -f "${domain_key}" ]]; then
+        if ask_confirm "检测到已存在域名密钥，是否覆盖? (选 y 重新生成)" "n"; then
+            acme_key_flag="--force"
+        else
+            if "${acme}" --help 2>/dev/null | grep -q -- "--reuse-key"; then
+                acme_key_flag="--reuse-key"
+                log_info "将复用已有密钥继续申请。"
+            else
+                log_warn "当前 acme.sh 版本不支持 --reuse-key。为安全起见已取消操作。"
+                return
+            fi
+        fi
+    fi
     
     if [[ "${acme_mode}" == "webroot" ]]; then
-        "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt || die "证书申请失败 (Webroot)"
+        "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt ${acme_key_flag} || die "证书申请失败 (Webroot)"
     else
         local type="${ngx%%:*}"
         local name="${ngx#*:}"
         trap 'ensure_nginx_running "$type" "$name"' EXIT
         stop_nginx_service "$type" "$name"
         open_firewall_port "80"
-        if ! "$acme" --issue --standalone -d "${domain}" --server letsencrypt; then die "证书申请失败 (Standalone)"; fi
+        if ! "$acme" --issue --standalone -d "${domain}" --server letsencrypt ${acme_key_flag}; then die "证书申请失败 (Standalone)"; fi
         trap - EXIT
         ensure_nginx_running "$type" "$name"
     fi
