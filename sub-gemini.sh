@@ -907,9 +907,23 @@ add_domain_ssl() {
         set -e
         return $rc
     }
+    check_acme_rate_limit() {
+        if tail -n 60 "${LOG_FILE}" | grep -q "rateLimited"; then
+            return 0
+        fi
+        return 1
+    }
+    get_acme_rate_limit_hint() {
+        tail -n 60 "${LOG_FILE}" | grep -oP 'retry after [^"]+' | head -n 1
+    }
     
     if [[ "${acme_mode}" == "webroot" ]]; then
         if ! run_acme_issue "webroot"; then
+            if check_acme_rate_limit; then
+                local hint
+                hint=$(get_acme_rate_limit_hint)
+                fail_step "证书申请" "acme.sh --issue (webroot)" "Let's Encrypt 率限制 ${hint:-}，请稍后再试"
+            fi
             log_warn "Webroot 签发失败，尝试切换到 Standalone 模式..."
             local type="${ngx%%:*}"
             local name="${ngx#*:}"
@@ -917,6 +931,11 @@ add_domain_ssl() {
             stop_nginx_service "$type" "$name"
             open_firewall_port "80"
             if ! run_acme_issue "standalone"; then
+                if check_acme_rate_limit; then
+                    local hint
+                    hint=$(get_acme_rate_limit_hint)
+                    fail_step "证书申请" "acme.sh --issue (standalone)" "Let's Encrypt 率限制 ${hint:-}，请稍后再试"
+                fi
                 fail_step "证书申请" "acme.sh --issue (webroot/standalone)" "检查 DNS 解析、80/443 入站、防火墙与 Webroot 路径"
             fi
             trap - EXIT
@@ -929,6 +948,11 @@ add_domain_ssl() {
         stop_nginx_service "$type" "$name"
         open_firewall_port "80"
         if ! run_acme_issue "standalone"; then
+            if check_acme_rate_limit; then
+                local hint
+                hint=$(get_acme_rate_limit_hint)
+                fail_step "证书申请" "acme.sh --issue --standalone" "Let's Encrypt 率限制 ${hint:-}，请稍后再试"
+            fi
             fail_step "证书申请" "acme.sh --issue --standalone" "检查 DNS 解析、80/443 入站、防火墙与端口占用"
         fi
         trap - EXIT
