@@ -887,11 +887,14 @@ add_domain_ssl() {
         fi
     fi
 
+    local LAST_ACME_LOG_SEGMENT=""
     run_acme_issue() {
         local mode="$1"
         local rc=0
         # Prevent 'set -e' from aborting the whole script on ACME failure
         set +e
+        local start_lines
+        start_lines=$(wc -l < "${LOG_FILE}")
         if [[ "$mode" == "webroot" ]]; then
             echo -e "\n[ACME] ----- BEGIN OUTPUT (webroot) -----" | tee -a "${LOG_FILE}"
             "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
@@ -904,17 +907,24 @@ add_domain_ssl() {
         "$acme" --issue --standalone -d "${domain}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
         rc=${PIPESTATUS[0]}
         echo -e "[ACME] ----- END OUTPUT (standalone) -----" | tee -a "${LOG_FILE}"
+        local log_slice
+        log_slice=$(tail -n +"$((start_lines+1))" "${LOG_FILE}")
+        LAST_ACME_LOG_SEGMENT="${log_slice}"
         set -e
         return $rc
     }
     check_acme_rate_limit() {
-        if tail -n 60 "${LOG_FILE}" | grep -q "rateLimited"; then
+        local log_segment="${1:-${LAST_ACME_LOG_SEGMENT:-}}"
+        if [[ -z "${log_segment}" ]]; then return 1; fi
+        if echo "${log_segment}" | grep -q "rateLimited"; then
             return 0
         fi
         return 1
     }
     get_acme_rate_limit_hint() {
-        tail -n 60 "${LOG_FILE}" | grep -oP 'retry after [^"]+' | head -n 1
+        local log_segment="${1:-${LAST_ACME_LOG_SEGMENT:-}}"
+        if [[ -z "${log_segment}" ]]; then return; fi
+        echo "${log_segment}" | grep -oP 'retry after [^"]+' | head -n 1
     }
     
     if [[ "${acme_mode}" == "webroot" ]]; then
@@ -1041,9 +1051,11 @@ write_nginx_conf() {
     local type="${ngx%%:*}"
     local name="${ngx#*:}"
     local conf="substore-${domain}.conf"
-    local config_cert_dir="${CURRENT_CERT_DIR}"
-    if [[ "${type}" == "docker" && "${CERT_MODE}" != "host_direct" ]]; then
+    local config_cert_dir
+    if [[ "${type}" == "docker" ]]; then
         config_cert_dir="${C_CERT_DIR}"
+    else
+        config_cert_dir="${CURRENT_CERT_DIR}"
     fi
     local content
     content=$(cat <<EOF
