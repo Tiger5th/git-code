@@ -90,6 +90,7 @@ CURRENT_NGINX_TARGET=""
 CURRENT_CONF_DIR=""
 CURRENT_CERT_DIR=""
 CONF_MODE=""
+CERT_MODE=""
 
 # ==============================================================================
 # SECTION 2: Low-Level Utility Functions & Environment Handlers
@@ -453,7 +454,7 @@ ensure_cert_dir() {
     local ngx="$1"
     local type="${ngx%%:*}"
     local name="${ngx#*:}"
-    if [[ "${CONF_MODE}" == "host_direct" ]]; then
+    if [[ "${CERT_MODE}" == "host_direct" ]]; then
         if ! mkdir -p "${CURRENT_CERT_DIR}"; then
             fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
         fi
@@ -785,6 +786,7 @@ resolve_nginx_paths() {
     CURRENT_CONF_DIR="/etc/nginx/conf.d"
     CURRENT_CERT_DIR="/etc/nginx/certs"
     CONF_MODE="host_direct"
+    CERT_MODE="host_direct"
 
     if [[ "$type" == "docker" ]]; then
         local net_mode
@@ -793,15 +795,21 @@ resolve_nginx_paths() {
             fail_step "Nginx 网络模式检查" "docker inspect ${name} --format '{{.HostConfig.NetworkMode}}'" "容器需使用 host 网络或改用宿主机 Nginx"
         fi
         
-        # FIX: pipefail might kill script if grep fails here. Use || true logic inside $() or check exit code
-        if docker inspect "${name}" --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "${LION_CONF_DIR}"; then
+        local mounts
+        mounts=$(docker inspect "${name}" --format '{{range .Mounts}}{{.Source}} {{end}}')
+        if echo "${mounts}" | grep -q "${LION_CONF_DIR}"; then
             CURRENT_CONF_DIR="${LION_CONF_DIR}"
-            CURRENT_CERT_DIR="${LION_CERT_DIR}"
             CONF_MODE="host_direct"
         else
             CURRENT_CONF_DIR="${C_CONF_DIR}"
-            CURRENT_CERT_DIR="${C_CERT_DIR}"
             CONF_MODE="docker_cp"
+        fi
+        if echo "${mounts}" | grep -q "${LION_CERT_DIR}"; then
+            CURRENT_CERT_DIR="${LION_CERT_DIR}"
+            CERT_MODE="host_direct"
+        else
+            CURRENT_CERT_DIR="${C_CERT_DIR}"
+            CERT_MODE="docker_cp"
         fi
     else
         if [[ -d "${LION_CONF_DIR}" ]]; then
@@ -976,7 +984,7 @@ generate_hook() {
 #!/bin/bash
 # Hook for ${domain} - Auto Managed by Sub-Store Script
 EOF
-    if [[ "${CONF_MODE}" == "host_direct" ]]; then
+    if [[ "${CERT_MODE}" == "host_direct" ]]; then
         echo "cp '${LOCAL_CERT_REPO}/${domain}.cer' '${CURRENT_CERT_DIR}/'" >> "${file}"
         echo "cp '${LOCAL_CERT_REPO}/${domain}.key' '${CURRENT_CERT_DIR}/'" >> "${file}"
     else
@@ -1188,7 +1196,7 @@ delete_domain() {
             ;;
         2)
             rm -f "${LOCAL_CERT_REPO}/${domain}.cer" "${LOCAL_CERT_REPO}/${domain}.key"
-            if [[ "${CONF_MODE}" == "host_direct" ]]; then
+            if [[ "${CERT_MODE}" == "host_direct" ]]; then
                 rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             else
                 docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
