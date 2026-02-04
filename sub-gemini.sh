@@ -454,13 +454,18 @@ ensure_cert_dir() {
     local ngx="$1"
     local type="${ngx%%:*}"
     local name="${ngx#*:}"
-    if [[ "${CERT_MODE}" == "host_direct" ]]; then
-        if ! mkdir -p "${CURRENT_CERT_DIR}"; then
-            fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
-        fi
-    else
+    if [[ "$type" == "docker" ]]; then
         if ! docker exec "${name}" sh -c "mkdir -p '${C_CERT_DIR}'"; then
             fail_step "创建证书目录" "docker exec ${name} mkdir -p ${C_CERT_DIR}" "检查容器权限或挂载是否可写"
+        fi
+        if [[ "${CERT_MODE}" == "host_direct" ]]; then
+            if ! mkdir -p "${CURRENT_CERT_DIR}"; then
+                fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
+            fi
+        fi
+    else
+        if ! mkdir -p "${CURRENT_CERT_DIR}"; then
+            fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
         fi
     fi
 }
@@ -984,12 +989,16 @@ generate_hook() {
 #!/bin/bash
 # Hook for ${domain} - Auto Managed by Sub-Store Script
 EOF
-    if [[ "${CERT_MODE}" == "host_direct" ]]; then
-        echo "cp '${LOCAL_CERT_REPO}/${domain}.cer' '${CURRENT_CERT_DIR}/'" >> "${file}"
-        echo "cp '${LOCAL_CERT_REPO}/${domain}.key' '${CURRENT_CERT_DIR}/'" >> "${file}"
-    else
+    if [[ "${type}" == "docker" ]]; then
+        if [[ "${CERT_MODE}" == "host_direct" ]]; then
+            echo "cp '${LOCAL_CERT_REPO}/${domain}.cer' '${CURRENT_CERT_DIR}/'" >> "${file}"
+            echo "cp '${LOCAL_CERT_REPO}/${domain}.key' '${CURRENT_CERT_DIR}/'" >> "${file}"
+        fi
         echo "docker cp '${LOCAL_CERT_REPO}/${domain}.cer' '${name}:${C_CERT_DIR}/'" >> "${file}"
         echo "docker cp '${LOCAL_CERT_REPO}/${domain}.key' '${name}:${C_CERT_DIR}/'" >> "${file}"
+    else
+        echo "cp '${LOCAL_CERT_REPO}/${domain}.cer' '${CURRENT_CERT_DIR}/'" >> "${file}"
+        echo "cp '${LOCAL_CERT_REPO}/${domain}.key' '${CURRENT_CERT_DIR}/'" >> "${file}"
     fi
     
     echo -e "\n# Reload Routine" >> "${file}"
