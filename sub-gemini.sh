@@ -459,8 +459,8 @@ ensure_cert_dir() {
             fail_step "创建证书目录" "mkdir -p ${CURRENT_CERT_DIR}" "检查权限/只读文件系统"
         fi
     else
-        if ! docker exec "${name}" sh -c "mkdir -p '${CURRENT_CERT_DIR}'"; then
-            fail_step "创建证书目录" "docker exec ${name} mkdir -p ${CURRENT_CERT_DIR}" "检查容器权限或挂载是否可写"
+        if ! docker exec "${name}" sh -c "mkdir -p '${C_CERT_DIR}'"; then
+            fail_step "创建证书目录" "docker exec ${name} mkdir -p ${C_CERT_DIR}" "检查容器权限或挂载是否可写"
         fi
     fi
 }
@@ -977,7 +977,7 @@ generate_hook() {
     local ngx="$1"
     local domain="$2"
     local file="$3"
-    local type="${ngx%%:*}"
+	  local type="${ngx%%:*}"
     local name="${ngx#*:}"
     
     cat > "${file}" <<EOF
@@ -988,8 +988,8 @@ EOF
         echo "cp '${LOCAL_CERT_REPO}/${domain}.cer' '${CURRENT_CERT_DIR}/'" >> "${file}"
         echo "cp '${LOCAL_CERT_REPO}/${domain}.key' '${CURRENT_CERT_DIR}/'" >> "${file}"
     else
-        echo "docker cp '${LOCAL_CERT_REPO}/${domain}.cer' '${name}:${CURRENT_CERT_DIR}/'" >> "${file}"
-        echo "docker cp '${LOCAL_CERT_REPO}/${domain}.key' '${name}:${CURRENT_CERT_DIR}/'" >> "${file}"
+        echo "docker cp '${LOCAL_CERT_REPO}/${domain}.cer' '${name}:${C_CERT_DIR}/'" >> "${file}"
+        echo "docker cp '${LOCAL_CERT_REPO}/${domain}.key' '${name}:${C_CERT_DIR}/'" >> "${file}"
     fi
     
     echo -e "\n# Reload Routine" >> "${file}"
@@ -1008,6 +1008,10 @@ write_nginx_conf() {
     local type="${ngx%%:*}"
     local name="${ngx#*:}"
     local conf="substore-${domain}.conf"
+    local config_cert_dir="${CURRENT_CERT_DIR}"
+    if [[ "${type}" == "docker" && "${CERT_MODE}" != "host_direct" ]]; then
+        config_cert_dir="${C_CERT_DIR}"
+    fi
     local content
     content=$(cat <<EOF
 # @SS_MANAGED: true
@@ -1024,8 +1028,8 @@ server {
     listen 443 ssl http2;
     server_name ${domain};
     
-    ssl_certificate ${CURRENT_CERT_DIR}/${domain}.cer;
-    ssl_certificate_key ${CURRENT_CERT_DIR}/${domain}.key;
+    ssl_certificate ${config_cert_dir}/${domain}.cer;
+    ssl_certificate_key ${config_cert_dir}/${domain}.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
     add_header Strict-Transport-Security "max-age=63072000" always;
@@ -1199,7 +1203,7 @@ delete_domain() {
             if [[ "${CERT_MODE}" == "host_direct" ]]; then
                 rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             else
-                docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
+                docker exec "${name}" rm -f "${C_CERT_DIR}/${domain}.cer" "${C_CERT_DIR}/${domain}.key"
             fi
             # Also remove acme.sh domain key to avoid reuse/overwrite prompt
             if ! safe_rm_rf "${acme_home}/${domain}" "${acme_home}/${domain}_ecc"; then
