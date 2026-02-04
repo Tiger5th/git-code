@@ -850,8 +850,7 @@ add_domain_ssl() {
     local acme_home="${ACME_HOME:-${HOME}/.acme.sh}"
     if [[ -f "${HOME}/.acme.sh/account.conf" ]]; then
         local conf_home
-        conf_home=$(grep -E '^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=' "${HOME}/.acme.sh/account.conf" \
-            | tail -n 1 | cut -d= -f2- | tr -d '"')
+        conf_home=$(awk -F= '/^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=/{v=$2} END{print v}' "${HOME}/.acme.sh/account.conf" | tr -d '"')
         if [[ -n "${conf_home}" ]]; then acme_home="${conf_home}"; fi
     fi
     mkdir -p "${LOCAL_CERT_REPO}"
@@ -1179,8 +1178,7 @@ delete_domain() {
     local acme_home="${ACME_HOME:-${HOME}/.acme.sh}"
     if [[ -f "${HOME}/.acme.sh/account.conf" ]]; then
         local conf_home
-        conf_home=$(grep -E '^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=' "${HOME}/.acme.sh/account.conf" \
-            | tail -n 1 | cut -d= -f2- | tr -d '"')
+        conf_home=$(awk -F= '/^(LE_WORKING_DIR|DEFAULT_HOME|LE_CONFIG_HOME)=/{v=$2} END{print v}' "${HOME}/.acme.sh/account.conf" | tr -d '"')
         if [[ -n "${conf_home}" ]]; then acme_home="${conf_home}"; fi
     fi
 
