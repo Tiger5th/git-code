@@ -764,17 +764,22 @@ add_domain_ssl() {
 
     run_acme_issue() {
         local mode="$1"
+        local rc=0
+        # Prevent 'set -e' from aborting the whole script on ACME failure
+        set +e
         if [[ "$mode" == "webroot" ]]; then
             echo -e "\n[ACME] ----- BEGIN OUTPUT (webroot) -----" | tee -a "${LOG_FILE}"
             "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
-            local rc=${PIPESTATUS[0]}
+            rc=${PIPESTATUS[0]}
             echo -e "[ACME] ----- END OUTPUT (webroot) -----" | tee -a "${LOG_FILE}"
+            set -e
             return $rc
         fi
         echo -e "\n[ACME] ----- BEGIN OUTPUT (standalone) -----" | tee -a "${LOG_FILE}"
         "$acme" --issue --standalone -d "${domain}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
-        local rc=${PIPESTATUS[0]}
+        rc=${PIPESTATUS[0]}
         echo -e "[ACME] ----- END OUTPUT (standalone) -----" | tee -a "${LOG_FILE}"
+        set -e
         return $rc
     }
     
