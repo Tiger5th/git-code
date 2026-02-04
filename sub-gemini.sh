@@ -761,16 +761,44 @@ add_domain_ssl() {
             fi
         fi
     fi
+
+    run_acme_issue() {
+        local mode="$1"
+        if [[ "$mode" == "webroot" ]]; then
+            echo -e "\n[ACME] ----- BEGIN OUTPUT (webroot) -----" | tee -a "${LOG_FILE}"
+            "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
+            local rc=${PIPESTATUS[0]}
+            echo -e "[ACME] ----- END OUTPUT (webroot) -----" | tee -a "${LOG_FILE}"
+            return $rc
+        fi
+        echo -e "\n[ACME] ----- BEGIN OUTPUT (standalone) -----" | tee -a "${LOG_FILE}"
+        "$acme" --issue --standalone -d "${domain}" --server letsencrypt ${acme_key_flag} 2>&1 | tee -a "${LOG_FILE}"
+        local rc=${PIPESTATUS[0]}
+        echo -e "[ACME] ----- END OUTPUT (standalone) -----" | tee -a "${LOG_FILE}"
+        return $rc
+    }
     
     if [[ "${acme_mode}" == "webroot" ]]; then
-        "$acme" --issue -d "${domain}" --webroot "${webroot_path}" --server letsencrypt ${acme_key_flag} || die "证书申请失败 (Webroot)"
+        if ! run_acme_issue "webroot"; then
+            log_warn "Webroot 签发失败，尝试切换到 Standalone 模式..."
+            local type="${ngx%%:*}"
+            local name="${ngx#*:}"
+            trap 'ensure_nginx_running "$type" "$name"' EXIT
+            stop_nginx_service "$type" "$name"
+            open_firewall_port "80"
+            if ! run_acme_issue "standalone"; then
+                die "证书申请失败 (Webroot & Standalone)"
+            fi
+            trap - EXIT
+            ensure_nginx_running "$type" "$name"
+        fi
     else
         local type="${ngx%%:*}"
         local name="${ngx#*:}"
         trap 'ensure_nginx_running "$type" "$name"' EXIT
         stop_nginx_service "$type" "$name"
         open_firewall_port "80"
-        if ! "$acme" --issue --standalone -d "${domain}" --server letsencrypt ${acme_key_flag}; then die "证书申请失败 (Standalone)"; fi
+        if ! run_acme_issue "standalone"; then die "证书申请失败 (Standalone)"; fi
         trap - EXIT
         ensure_nginx_running "$type" "$name"
     fi
