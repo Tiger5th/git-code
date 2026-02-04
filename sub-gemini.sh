@@ -975,6 +975,8 @@ delete_domain() {
             else
                 docker exec "${name}" rm -f "${CURRENT_CERT_DIR}/${domain}.cer" "${CURRENT_CERT_DIR}/${domain}.key"
             fi
+            # Also remove acme.sh domain key to avoid reuse/overwrite prompt
+            rm -rf "${HOME}/.acme.sh/${domain}"
             ;;
         3)
             log_info "保留证书文件不变。"
